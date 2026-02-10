@@ -7,20 +7,19 @@ app.use(express.json());
 
 // ===== ENV VARS (set these in Render) =====
 const DAILY_API_KEY = process.env.DAILY_API_KEY;          // Keep secret
-const DAILY_DOMAIN  = process.env.DAILY_DOMAIN;           // https://agzit.daily.co (not used yet, ok)
-const REVEI_SECRET  = process.env.REVEI_SHARED_SECRET;    // Shared secret
+const REVEI_SECRET  = process.env.REVEI_SHARED_SECRET;    // Shared secret between WP server and Render
 
 function requireEnv() {
   const missing = [];
   if (!DAILY_API_KEY) missing.push("DAILY_API_KEY");
-  if (!DAILY_DOMAIN) missing.push("DAILY_DOMAIN");
   if (!REVEI_SECRET) missing.push("REVEI_SHARED_SECRET");
   if (missing.length) throw new Error("Missing env vars: " + missing.join(", "));
 }
 
+// Health check
 app.get("/health", (req, res) => res.json({ ok: true }));
 
-// Simple auth for MVP (WordPress JS calls backend with this header)
+// Server-to-server auth (ONLY WordPress should call this)
 function checkSecret(req) {
   const s = req.headers["x-revei-secret"];
   return s && s === REVEI_SECRET;
@@ -28,8 +27,8 @@ function checkSecret(req) {
 
 /**
  * POST /create-room
- * Body: { sid: "MIS-XXXX", minutes: 15 }
- * Returns: { room_url, join_url, recording }
+ * Body: { sid: "MIS-XXXX", minutes: 15, candidate_name: "Wasim" }
+ * Returns: { join_url, room_url, room_name, recording }
  */
 app.post("/create-room", async (req, res) => {
   try {
@@ -38,9 +37,13 @@ app.post("/create-room", async (req, res) => {
 
     const sid = String(req.body?.sid || "").trim();
     const minutes = Number(req.body?.minutes || 15);
+    const candidateNameRaw = String(req.body?.candidate_name || "").trim();
 
     if (!sid) return res.status(400).json({ error: "sid_required" });
     if (![15, 30].includes(minutes)) return res.status(400).json({ error: "minutes_must_be_15_or_30" });
+
+    // Safe display name (Daily UI)
+    const candidateName = (candidateNameRaw || "Candidate").slice(0, 60);
 
     const roomName = `mock-${sid}`.toLowerCase().replace(/[^a-z0-9-_]/g, "-").slice(0, 60);
 
@@ -55,13 +58,13 @@ app.post("/create-room", async (req, res) => {
         name: roomName,
         privacy: "private",
         properties: {
-          exp: Math.floor(Date.now() / 1000) + (60 * 60), // room expiry 1 hour
+          exp: Math.floor(Date.now() / 1000) + (60 * 60), // 1 hour room expiry
           max_participants: 4
         }
       })
     });
 
-    // If room already exists (409), fetch it
+    // If room exists, fetch it
     let roomData;
     if (createRoomResp.status === 409) {
       const getRoomResp = await fetch(`https://api.daily.co/v1/rooms/${roomName}`, {
@@ -76,21 +79,19 @@ app.post("/create-room", async (req, res) => {
       return res.status(500).json({ error: "daily_room_failed", details: roomData });
     }
 
-    // 2) Start cloud recording
+    // 2) Start cloud recording (MVP: start now)
     const startRecResp = await fetch(`https://api.daily.co/v1/rooms/${roomName}/recordings/start`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${DAILY_API_KEY}`
       },
-      body: JSON.stringify({
-        // default cloud recording
-      })
+      body: JSON.stringify({})
     });
 
     const recData = await startRecResp.json();
 
-    // 3) Create meeting token so user can join private room
+    // 3) Create meeting token INCLUDING user_name so Daily won't ask for name
     const tokenResp = await fetch("https://api.daily.co/v1/meeting-tokens", {
       method: "POST",
       headers: {
@@ -100,6 +101,7 @@ app.post("/create-room", async (req, res) => {
       body: JSON.stringify({
         properties: {
           room_name: roomName,
+          user_name: candidateName,
           exp: Math.floor(Date.now() / 1000) + (60 * 60), // token valid 60 min
           eject_at_token_exp: true
         }
@@ -120,35 +122,6 @@ app.post("/create-room", async (req, res) => {
       join_url: joinUrl,
       recording: recData
     });
-
-  } catch (e) {
-    return res.status(500).json({ error: "server_error", message: e.message });
-  }
-});
-
-/**
- * POST /stop-recording
- * Body: { room_name: "mock-mis-xxxx", recording_id: "rec_..." }
- */
-app.post("/stop-recording", async (req, res) => {
-  try {
-    requireEnv();
-    if (!checkSecret(req)) return res.status(401).json({ error: "unauthorized" });
-
-    const roomName = String(req.body?.room_name || "").trim();
-    const recordingId = String(req.body?.recording_id || "").trim();
-
-    if (!roomName || !recordingId) {
-      return res.status(400).json({ error: "room_name_and_recording_id_required" });
-    }
-
-    const stopResp = await fetch(`https://api.daily.co/v1/rooms/${roomName}/recordings/${recordingId}/stop`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${DAILY_API_KEY}` }
-    });
-
-    const stopData = await stopResp.json();
-    return res.json({ ok: true, stop: stopData });
 
   } catch (e) {
     return res.status(500).json({ error: "server_error", message: e.message });
