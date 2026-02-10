@@ -1,6 +1,5 @@
 import express from "express";
 import cors from "cors";
-import crypto from "crypto";
 
 const app = express();
 app.use(cors());
@@ -16,24 +15,48 @@ function requireEnv() {
   if (missing.length) throw new Error("Missing env vars: " + missing.join(", "));
 }
 
-app.get("/health", (req, res) => res.json({ ok: true }));
-
 function checkSecret(req) {
   const s = req.headers["x-revei-secret"];
   return s && s === REVEI_SECRET;
 }
 
-function hmacSig(message) {
-  return crypto.createHmac("sha256", REVEI_SECRET).update(message).digest("hex");
-}
+app.get("/health", (req, res) => res.json({ ok: true }));
 
-function safeEqual(a, b) {
+/**
+ * ✅ ONE-TIME: Enable streaming so recording links become playable (inline)
+ * Daily docs: recordings_bucket.allow_streaming_from_bucket controls attachment vs inline. :contentReference[oaicite:1]{index=1}
+ *
+ * Call this once from Postman (GET):
+ *  - URL: https://agzit-daily-backend.onrender.com/enable-streaming
+ *  - Header: x-revei-secret: <your secret>
+ */
+app.get("/enable-streaming", async (req, res) => {
   try {
-    return crypto.timingSafeEqual(Buffer.from(a, "utf8"), Buffer.from(b, "utf8"));
-  } catch {
-    return false;
+    requireEnv();
+    if (!checkSecret(req)) return res.status(401).json({ error: "unauthorized" });
+
+    // Set domain config
+    const resp = await fetch("https://api.daily.co/v1/", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${DAILY_API_KEY}`
+      },
+      body: JSON.stringify({
+        recordings_bucket: {
+          allow_streaming_from_bucket: true
+        }
+      })
+    });
+
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) return res.status(500).json({ error: "daily_set_domain_failed", details: data });
+
+    return res.json({ ok: true, message: "Streaming enabled (inline playback)", daily: data });
+  } catch (e) {
+    return res.status(500).json({ error: "server_error", message: e.message });
   }
-}
+});
 
 /**
  * POST /create-room
@@ -74,7 +97,7 @@ app.post("/create-room", async (req, res) => {
 
     const createJson = await createRoomResp.json().catch(() => ({}));
 
-    // Robust “room already exists” detection
+    // Robust “already exists”
     let roomData = null;
     const roomAlreadyExists =
       createRoomResp.status === 409 ||
@@ -93,7 +116,7 @@ app.post("/create-room", async (req, res) => {
       return res.status(500).json({ error: "daily_room_failed", details: roomData });
     }
 
-    // Token auto-start cloud recording on join + sets name
+    // Token sets name + auto-starts cloud recording
     const tokenResp = await fetch("https://api.daily.co/v1/meeting-tokens", {
       method: "POST",
       headers: {
@@ -162,8 +185,7 @@ app.get("/latest-recording", async (req, res) => {
 });
 
 /**
- * GET /recording-link?recording_id=XXXX   (SERVER-TO-SERVER ONLY)
- * Requires x-revei-secret header
+ * GET /recording-link?recording_id=XXXX
  * Returns: { ok:true, mp4_url, expires }
  */
 app.get("/recording-link", async (req, res) => {
@@ -182,75 +204,10 @@ app.get("/recording-link", async (req, res) => {
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok) return res.status(500).json({ error: "daily_access_link_failed", details: data });
 
-    if (data?.download_link) {
-      return res.json({ ok: true, mp4_url: data.download_link, expires: data.expires || null });
-    }
+    const link = data?.link || data?.url || "";
+    if (!link) return res.status(500).json({ error: "mp4_link_missing", details: data });
 
-    return res.json({ ok: false, status: "processing", details: data });
-  } catch (e) {
-    return res.status(500).json({ error: "server_error", message: e.message });
-  }
-});
-
-/**
- * ✅ NEW: GET /stream-recording?recording_id=...&exp=...&sig=...
- * Browser-safe streaming endpoint:
- * - No secret header needed
- * - WordPress signs URL (HMAC) so only legit users can stream for short time
- * - Streams MP4 with inline disposition (plays in browser)
- */
-app.get("/stream-recording", async (req, res) => {
-  try {
-    requireEnv();
-
-    const recordingId = String(req.query?.recording_id || "").trim();
-    const exp = String(req.query?.exp || "").trim();
-    const sig = String(req.query?.sig || "").trim();
-
-    if (!recordingId || !exp || !sig) {
-      return res.status(400).json({ error: "missing_params" });
-    }
-
-    const expNum = Number(exp);
-    const now = Math.floor(Date.now() / 1000);
-
-    if (!Number.isFinite(expNum) || expNum < now) {
-      return res.status(401).json({ error: "expired" });
-    }
-
-    const message = `${recordingId}|${expNum}`;
-    const expected = hmacSig(message);
-
-    if (!safeEqual(expected, sig)) {
-      return res.status(401).json({ error: "bad_signature" });
-    }
-
-    // Get fresh Daily download link
-    const resp = await fetch(
-      `https://api.daily.co/v1/recordings/${encodeURIComponent(recordingId)}/access-link`,
-      { headers: { Authorization: `Bearer ${DAILY_API_KEY}` } }
-    );
-
-    const data = await resp.json().catch(() => ({}));
-    if (!resp.ok) return res.status(500).json({ error: "daily_access_link_failed", details: data });
-
-    const url = data?.download_link;
-    if (!url) {
-      return res.status(202).json({ ok: false, status: "processing" });
-    }
-
-    // Fetch MP4 and stream it inline
-    const mp4Resp = await fetch(url);
-    if (!mp4Resp.ok || !mp4Resp.body) {
-      return res.status(502).json({ error: "mp4_fetch_failed" });
-    }
-
-    res.setHeader("Content-Type", "video/mp4");
-    res.setHeader("Content-Disposition", 'inline; filename="mock-interview.mp4"');
-    res.setHeader("Cache-Control", "no-store");
-
-    // Pipe stream
-    mp4Resp.body.pipe(res);
+    return res.json({ ok: true, mp4_url: link, expires: data?.expires || null });
 
   } catch (e) {
     return res.status(500).json({ error: "server_error", message: e.message });
