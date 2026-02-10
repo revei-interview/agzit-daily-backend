@@ -100,11 +100,26 @@ app.post("/create-room", async (req, res) => {
 
     const joinUrl = `${roomData.url}?t=${encodeURIComponent(tokenData.token)}`;
 
-    return res.json({
-      room_name: roomName,
-      room_url: roomData.url,
-      join_url: joinUrl
-    });
+    // Fetch latest recording for this room (may be processing)
+const recListResp = await fetch(
+  `https://api.daily.co/v1/recordings?room_name=${encodeURIComponent(roomName)}`,
+  {
+    headers: { Authorization: `Bearer ${DAILY_API_KEY}` }
+  }
+);
+
+const recList = await recListResp.json();
+const latestRecording = Array.isArray(recList?.data) && recList.data.length
+  ? recList.data[0]
+  : null;
+
+return res.json({
+  room_name: roomName,
+  room_url: roomData.url,
+  join_url: joinUrl,
+  recording_id: latestRecording ? latestRecording.id : null
+});
+
 
   } catch (e) {
     return res.status(500).json({ error: "server_error", message: e.message });
