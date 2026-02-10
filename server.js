@@ -90,12 +90,36 @@ app.post("/create-room", async (req, res) => {
 
     const recData = await startRecResp.json();
 
-    // Return to frontend
-    return res.json({
+// Create a meeting token so user can join private room
+const tokenResp = await fetch("https://api.daily.co/v1/meeting-tokens", {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${DAILY_API_KEY}`
+  },
+  body: JSON.stringify({
+    properties: {
       room_name: roomName,
-      room_url: roomData.url,
-      recording: recData
-    });
+      exp: Math.floor(Date.now() / 1000) + (60 * 15), // 15 min
+      eject_at_token_exp: true
+    }
+  })
+});
+
+const tokenData = await tokenResp.json();
+
+if (!tokenData?.token) {
+  return res.status(500).json({ error: "meeting_token_failed", details: tokenData });
+}
+
+const joinUrl = `${roomData.url}?t=${encodeURIComponent(tokenData.token)}`;
+
+return res.json({
+  room_name: roomName,
+  room_url: roomData.url,
+  join_url: joinUrl,
+  recording: recData
+});
   } catch (e) {
     return res.status(500).json({ error: "server_error", message: e.message });
   }
