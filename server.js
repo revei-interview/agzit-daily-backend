@@ -37,7 +37,8 @@ app.post("/create-room", async (req, res) => {
     const candidateName = (candidateNameRaw || "Candidate").slice(0, 60);
     const roomName = `mock-${sid}`.toLowerCase().replace(/[^a-z0-9-_]/g, "-").slice(0, 60);
 
-    // 1) Create private room WITH cloud recording enabled + auto-start on join
+    // ✅ Create private room with cloud recording enabled at ROOM level
+    // Daily: enable_recording = "cloud" at room level :contentReference[oaicite:2]{index=2}
     const createRoomResp = await fetch("https://api.daily.co/v1/rooms", {
       method: "POST",
       headers: {
@@ -48,13 +49,9 @@ app.post("/create-room", async (req, res) => {
         name: roomName,
         privacy: "private",
         properties: {
-          exp: Math.floor(Date.now() / 1000) + (60 * 60), // 1 hour expiry
+          exp: Math.floor(Date.now() / 1000) + (60 * 60), // room expires in 1 hour
           max_participants: 4,
-
-          // ✅ enable cloud recording + auto start
-          enable_cloud_recording: true,
-          start_cloud_recording_on_join: true,
-          cloud_recording_mode: "cloud"
+          enable_recording: "cloud"
         }
       })
     });
@@ -73,7 +70,10 @@ app.post("/create-room", async (req, res) => {
       return res.status(500).json({ error: "daily_room_failed", details: roomData });
     }
 
-    // 2) Create meeting token INCLUDING user_name so Daily won't ask for name
+    // ✅ Create meeting token:
+    // - user_name sets the display name (no prompt)
+    // - enable_recording:"cloud" allows recording controls for this participant
+    // - start_cloud_recording:true auto-starts recording when they join :contentReference[oaicite:3]{index=3}
     const tokenResp = await fetch("https://api.daily.co/v1/meeting-tokens", {
       method: "POST",
       headers: {
@@ -85,13 +85,15 @@ app.post("/create-room", async (req, res) => {
           room_name: roomName,
           user_name: candidateName,
           exp: Math.floor(Date.now() / 1000) + (60 * 60),
-          eject_at_token_exp: true
+          eject_at_token_exp: true,
+
+          enable_recording: "cloud",
+          start_cloud_recording: true
         }
       })
     });
 
     const tokenData = await tokenResp.json();
-
     if (!tokenData?.token) {
       return res.status(500).json({ error: "meeting_token_failed", details: tokenData });
     }
