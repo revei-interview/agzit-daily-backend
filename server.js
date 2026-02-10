@@ -38,7 +38,7 @@ app.post("/create-room", async (req, res) => {
     const roomName = `mock-${sid}`.toLowerCase().replace(/[^a-z0-9-_]/g, "-").slice(0, 60);
 
     // ✅ Create private room with cloud recording enabled at ROOM level
-    // Daily: enable_recording = "cloud" at room level :contentReference[oaicite:2]{index=2}
+    // Daily: enable_recording = "cloud" at room level
     const createRoomResp = await fetch("https://api.daily.co/v1/rooms", {
       method: "POST",
       headers: {
@@ -73,7 +73,7 @@ app.post("/create-room", async (req, res) => {
     // ✅ Create meeting token:
     // - user_name sets the display name (no prompt)
     // - enable_recording:"cloud" allows recording controls for this participant
-    // - start_cloud_recording:true auto-starts recording when they join :contentReference[oaicite:3]{index=3}
+    // - start_cloud_recording:true auto-starts recording when they join
     const tokenResp = await fetch("https://api.daily.co/v1/meeting-tokens", {
       method: "POST",
       headers: {
