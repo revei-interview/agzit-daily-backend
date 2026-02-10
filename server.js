@@ -6,31 +6,31 @@ app.use(cors());
 app.use(express.json());
 
 // ===== ENV VARS (set these in Render) =====
-const DAILY_API_KEY = process.env.DAILY_API_KEY;          // NEW key (don’t expose)
-const DAILY_DOMAIN  = process.env.DAILY_DOMAIN;           // https://agzit.daily.co
-const REVEI_SECRET  = process.env.REVEI_SHARED_SECRET;    // your shared secret
+const DAILY_API_KEY = process.env.DAILY_API_KEY;          // Keep secret
+const DAILY_DOMAIN  = process.env.DAILY_DOMAIN;           // https://agzit.daily.co (not used yet, ok)
+const REVEI_SECRET  = process.env.REVEI_SHARED_SECRET;    // Shared secret
 
 function requireEnv() {
   const missing = [];
   if (!DAILY_API_KEY) missing.push("DAILY_API_KEY");
   if (!DAILY_DOMAIN) missing.push("DAILY_DOMAIN");
   if (!REVEI_SECRET) missing.push("REVEI_SHARED_SECRET");
-  if (missing.length) {
-    throw new Error("Missing env vars: " + missing.join(", "));
-  }
+  if (missing.length) throw new Error("Missing env vars: " + missing.join(", "));
 }
 
 app.get("/health", (req, res) => res.json({ ok: true }));
 
-// Simple auth for server-to-server calls (frontend will call this; keep it basic for MVP)
-// Send header: x-revei-secret: <secret>
+// Simple auth for MVP (WordPress JS calls backend with this header)
 function checkSecret(req) {
   const s = req.headers["x-revei-secret"];
   return s && s === REVEI_SECRET;
 }
 
-// 1) Create a Daily room
-// Body: { sid: "MIS-XXXX", minutes: 15 }
+/**
+ * POST /create-room
+ * Body: { sid: "MIS-XXXX", minutes: 15 }
+ * Returns: { room_url, join_url, recording }
+ */
 app.post("/create-room", async (req, res) => {
   try {
     requireEnv();
@@ -40,9 +40,11 @@ app.post("/create-room", async (req, res) => {
     const minutes = Number(req.body?.minutes || 15);
 
     if (!sid) return res.status(400).json({ error: "sid_required" });
+    if (![15, 30].includes(minutes)) return res.status(400).json({ error: "minutes_must_be_15_or_30" });
+
     const roomName = `mock-${sid}`.toLowerCase().replace(/[^a-z0-9-_]/g, "-").slice(0, 60);
 
-    // Create a private room
+    // 1) Create private room
     const createRoomResp = await fetch("https://api.daily.co/v1/rooms", {
       method: "POST",
       headers: {
@@ -53,13 +55,13 @@ app.post("/create-room", async (req, res) => {
         name: roomName,
         privacy: "private",
         properties: {
-          exp: Math.floor(Date.now() / 1000) + (60 * 60), // 1 hour expiry
-          max_participants: 2
+          exp: Math.floor(Date.now() / 1000) + (60 * 60), // room expiry 1 hour
+          max_participants: 4
         }
       })
     });
 
-    // If room already exists, Daily returns 409. We’ll fetch it.
+    // If room already exists (409), fetch it
     let roomData;
     if (createRoomResp.status === 409) {
       const getRoomResp = await fetch(`https://api.daily.co/v1/rooms/${roomName}`, {
@@ -75,7 +77,6 @@ app.post("/create-room", async (req, res) => {
     }
 
     // 2) Start cloud recording
-    // Daily docs: POST /rooms/:name/recordings/start :contentReference[oaicite:1]{index=1}
     const startRecResp = await fetch(`https://api.daily.co/v1/rooms/${roomName}/recordings/start`, {
       method: "POST",
       headers: {
@@ -83,50 +84,52 @@ app.post("/create-room", async (req, res) => {
         Authorization: `Bearer ${DAILY_API_KEY}`
       },
       body: JSON.stringify({
-        // default "cloud" recording; keep it simple for MVP
-        // layout can be configured later
+        // default cloud recording
       })
     });
 
     const recData = await startRecResp.json();
 
-// Create a meeting token so user can join private room
-const tokenResp = await fetch("https://api.daily.co/v1/meeting-tokens", {
-  method: "POST",
-  headers: {
-    "Content-Type": "application/json",
-    Authorization: `Bearer ${DAILY_API_KEY}`
-  },
-  body: JSON.stringify({
-    properties: {
-      room_name: roomName,
-      exp: Math.floor(Date.now() / 1000) + (60 * 15), // 15 min
-      eject_at_token_exp: true
+    // 3) Create meeting token so user can join private room
+    const tokenResp = await fetch("https://api.daily.co/v1/meeting-tokens", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${DAILY_API_KEY}`
+      },
+      body: JSON.stringify({
+        properties: {
+          room_name: roomName,
+          exp: Math.floor(Date.now() / 1000) + (60 * 15), // token valid 15 min
+          eject_at_token_exp: true
+        }
+      })
+    });
+
+    const tokenData = await tokenResp.json();
+
+    if (!tokenData?.token) {
+      return res.status(500).json({ error: "meeting_token_failed", details: tokenData });
     }
-  })
-});
 
-const tokenData = await tokenResp.json();
+    const joinUrl = `${roomData.url}?t=${encodeURIComponent(tokenData.token)}`;
 
-if (!tokenData?.token) {
-  return res.status(500).json({ error: "meeting_token_failed", details: tokenData });
-}
+    return res.json({
+      room_name: roomName,
+      room_url: roomData.url,
+      join_url: joinUrl,
+      recording: recData
+    });
 
-const joinUrl = `${roomData.url}?t=${encodeURIComponent(tokenData.token)}`;
-
-return res.json({
-  room_name: roomName,
-  room_url: roomData.url,
-  join_url: joinUrl,
-  recording: recData
-});
   } catch (e) {
     return res.status(500).json({ error: "server_error", message: e.message });
   }
 });
 
-// 3) Stop recording (we’ll later fetch mp4 link)
-// Body: { sid: "MIS-XXXX", recording_id: "rec_..." }
+/**
+ * POST /stop-recording
+ * Body: { room_name: "mock-mis-xxxx", recording_id: "rec_..." }
+ */
 app.post("/stop-recording", async (req, res) => {
   try {
     requireEnv();
@@ -139,7 +142,6 @@ app.post("/stop-recording", async (req, res) => {
       return res.status(400).json({ error: "room_name_and_recording_id_required" });
     }
 
-    // Stop: POST /rooms/:name/recordings/:recordingId/stop (see Recordings endpoints) :contentReference[oaicite:2]{index=2}
     const stopResp = await fetch(`https://api.daily.co/v1/rooms/${roomName}/recordings/${recordingId}/stop`, {
       method: "POST",
       headers: { Authorization: `Bearer ${DAILY_API_KEY}` }
@@ -147,6 +149,7 @@ app.post("/stop-recording", async (req, res) => {
 
     const stopData = await stopResp.json();
     return res.json({ ok: true, stop: stopData });
+
   } catch (e) {
     return res.status(500).json({ error: "server_error", message: e.message });
   }
