@@ -54,14 +54,19 @@ app.post("/create-room", async (req, res) => {
         "Content-Type": "application/json",
         Authorization: `Bearer ${DAILY_API_KEY}`
       },
-      body: JSON.stringify({
-        name: roomName,
-        privacy: "private",
-        properties: {
-          exp: Math.floor(Date.now() / 1000) + (60 * 60), // 1 hour room expiry
-          max_participants: 4
-        }
-      })
+body: JSON.stringify({
+  name: roomName,
+  privacy: "private",
+  properties: {
+    exp: Math.floor(Date.now() / 1000) + (60 * 60), // 1 hour expiry
+    max_participants: 4,
+
+    // ✅ THIS IS THE KEY PART
+    enable_cloud_recording: true,
+    start_cloud_recording_on_join: true,
+    cloud_recording_mode: "cloud" // full audio+video mp4
+  }
+})
     });
 
     // If room exists, fetch it
