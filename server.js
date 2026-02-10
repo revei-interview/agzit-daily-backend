@@ -25,7 +25,7 @@ function checkSecret(req) {
 /**
  * POST /create-room
  * Body: { sid, minutes, candidate_name }
- * Returns: { room_name, room_url, join_url, recording_id }
+ * Returns: { room_name, room_url, join_url }
  */
 app.post("/create-room", async (req, res) => {
   try {
@@ -42,7 +42,6 @@ app.post("/create-room", async (req, res) => {
     const candidateName = (candidateNameRaw || "Candidate").slice(0, 60);
     const roomName = `mock-${sid}`.toLowerCase().replace(/[^a-z0-9-_]/g, "-").slice(0, 60);
 
-    // 1) Create private room with cloud recording enabled at ROOM level
     const createRoomResp = await fetch("https://api.daily.co/v1/rooms", {
       method: "POST",
       headers: {
@@ -53,43 +52,35 @@ app.post("/create-room", async (req, res) => {
         name: roomName,
         privacy: "private",
         properties: {
-          exp: Math.floor(Date.now() / 1000) + (60 * 60), // room expires in 1 hour
+          exp: Math.floor(Date.now() / 1000) + (60 * 60),
           max_participants: 4,
           enable_recording: "cloud"
         }
       })
     });
 
-// Parse create response
-const createJson = await createRoomResp.json().catch(() => ({}));
+    const createJson = await createRoomResp.json().catch(() => ({}));
 
-// If room exists, Daily may respond with different status codes.
-// So we detect it by message and fetch the room by name.
-let roomData = null;
+    // Robust “room already exists” detection
+    let roomData = null;
+    const roomAlreadyExists =
+      createRoomResp.status === 409 ||
+      (createJson?.info && String(createJson.info).toLowerCase().includes("already exists"));
 
-const roomAlreadyExists =
-  createRoomResp.status === 409 ||
-  (createJson?.info && String(createJson.info).toLowerCase().includes("already exists")) ||
-  (createJson?.error && String(createJson.error).toLowerCase().includes("invalid-request-error") && String(createJson?.info || "").toLowerCase().includes("already exists"));
-
-if (roomAlreadyExists) {
-  const getRoomResp = await fetch(`https://api.daily.co/v1/rooms/${roomName}`, {
-    headers: { Authorization: `Bearer ${DAILY_API_KEY}` }
-  });
-  roomData = await getRoomResp.json().catch(() => ({}));
-} else {
-  roomData = createJson;
-}
-
+    if (roomAlreadyExists) {
+      const getRoomResp = await fetch(`https://api.daily.co/v1/rooms/${roomName}`, {
+        headers: { Authorization: `Bearer ${DAILY_API_KEY}` }
+      });
+      roomData = await getRoomResp.json().catch(() => ({}));
+    } else {
+      roomData = createJson;
+    }
 
     if (!roomData?.url) {
       return res.status(500).json({ error: "daily_room_failed", details: roomData });
     }
 
-    // 2) Create meeting token:
-    // - user_name sets the display name
-    // - enable_recording:"cloud" enables recording for participant
-    // - start_cloud_recording:true starts recording on join
+    // Token auto-start cloud recording on join + sets name
     const tokenResp = await fetch("https://api.daily.co/v1/meeting-tokens", {
       method: "POST",
       headers: {
@@ -108,27 +99,17 @@ if (roomAlreadyExists) {
       })
     });
 
-    const tokenData = await tokenResp.json();
+    const tokenData = await tokenResp.json().catch(() => ({}));
     if (!tokenData?.token) {
       return res.status(500).json({ error: "meeting_token_failed", details: tokenData });
     }
 
     const joinUrl = `${roomData.url}?t=${encodeURIComponent(tokenData.token)}`;
 
-    // 3) Fetch latest recording for this room (may still be processing)
-    const recListResp = await fetch(
-      `https://api.daily.co/v1/recordings?room_name=${encodeURIComponent(roomName)}`,
-      { headers: { Authorization: `Bearer ${DAILY_API_KEY}` } }
-    );
-
-    const recList = await recListResp.json();
-    const latestRecording = Array.isArray(recList?.data) && recList.data.length ? recList.data[0] : null;
-
     return res.json({
       room_name: roomName,
       room_url: roomData.url,
-      join_url: joinUrl,
-      recording_id: latestRecording ? latestRecording.id : null
+      join_url: joinUrl
     });
 
   } catch (e) {
@@ -137,9 +118,39 @@ if (roomAlreadyExists) {
 });
 
 /**
+ * GET /latest-recording?room_name=mock-mis-xxxx
+ * Returns: { ok:true, recording_id, status }
+ */
+app.get("/latest-recording", async (req, res) => {
+  try {
+    requireEnv();
+    if (!checkSecret(req)) return res.status(401).json({ error: "unauthorized" });
+
+    const roomName = String(req.query?.room_name || "").trim();
+    if (!roomName) return res.status(400).json({ error: "room_name_required" });
+
+    const recListResp = await fetch(
+      `https://api.daily.co/v1/recordings?room_name=${encodeURIComponent(roomName)}`,
+      { headers: { Authorization: `Bearer ${DAILY_API_KEY}` } }
+    );
+
+    const recList = await recListResp.json().catch(() => ({}));
+    const latest = Array.isArray(recList?.data) && recList.data.length ? recList.data[0] : null;
+
+    if (!latest?.id) {
+      return res.json({ ok: true, recording_id: null, status: "not_found_yet" });
+    }
+
+    return res.json({ ok: true, recording_id: latest.id, status: latest.status || null });
+
+  } catch (e) {
+    return res.status(500).json({ error: "server_error", message: e.message });
+  }
+});
+
+/**
  * GET /recording-link?recording_id=XXXX
- * Returns: { ok: true, mp4_url: "https://..." }
- * NOTE: must be called server-to-server with x-revei-secret
+ * Returns: { ok:true, mp4_url }
  */
 app.get("/recording-link", async (req, res) => {
   try {
@@ -154,16 +165,11 @@ app.get("/recording-link", async (req, res) => {
       { headers: { Authorization: `Bearer ${DAILY_API_KEY}` } }
     );
 
-    const data = await resp.json();
-
-    if (!resp.ok) {
-      return res.status(500).json({ error: "daily_access_link_failed", details: data });
-    }
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) return res.status(500).json({ error: "daily_access_link_failed", details: data });
 
     const link = data?.link || data?.url || "";
-    if (!link) {
-      return res.status(500).json({ error: "mp4_link_missing", details: data });
-    }
+    if (!link) return res.status(500).json({ error: "mp4_link_missing", details: data });
 
     return res.json({ ok: true, mp4_url: link });
 
