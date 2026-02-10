@@ -22,6 +22,11 @@ function checkSecret(req) {
   return s && s === REVEI_SECRET;
 }
 
+/**
+ * POST /create-room
+ * Body: { sid, minutes, candidate_name }
+ * Returns: { room_name, room_url, join_url, recording_id }
+ */
 app.post("/create-room", async (req, res) => {
   try {
     requireEnv();
@@ -37,8 +42,7 @@ app.post("/create-room", async (req, res) => {
     const candidateName = (candidateNameRaw || "Candidate").slice(0, 60);
     const roomName = `mock-${sid}`.toLowerCase().replace(/[^a-z0-9-_]/g, "-").slice(0, 60);
 
-    // ✅ Create private room with cloud recording enabled at ROOM level
-    // Daily: enable_recording = "cloud" at room level
+    // 1) Create private room with cloud recording enabled at ROOM level
     const createRoomResp = await fetch("https://api.daily.co/v1/rooms", {
       method: "POST",
       headers: {
@@ -70,10 +74,10 @@ app.post("/create-room", async (req, res) => {
       return res.status(500).json({ error: "daily_room_failed", details: roomData });
     }
 
-    // ✅ Create meeting token:
-    // - user_name sets the display name (no prompt)
-    // - enable_recording:"cloud" allows recording controls for this participant
-    // - start_cloud_recording:true auto-starts recording when they join
+    // 2) Create meeting token:
+    // - user_name sets the display name
+    // - enable_recording:"cloud" enables recording for participant
+    // - start_cloud_recording:true starts recording on join
     const tokenResp = await fetch("https://api.daily.co/v1/meeting-tokens", {
       method: "POST",
       headers: {
@@ -86,7 +90,6 @@ app.post("/create-room", async (req, res) => {
           user_name: candidateName,
           exp: Math.floor(Date.now() / 1000) + (60 * 60),
           eject_at_token_exp: true,
-
           enable_recording: "cloud",
           start_cloud_recording: true
         }
@@ -100,26 +103,57 @@ app.post("/create-room", async (req, res) => {
 
     const joinUrl = `${roomData.url}?t=${encodeURIComponent(tokenData.token)}`;
 
-    // Fetch latest recording for this room (may be processing)
-const recListResp = await fetch(
-  `https://api.daily.co/v1/recordings?room_name=${encodeURIComponent(roomName)}`,
-  {
-    headers: { Authorization: `Bearer ${DAILY_API_KEY}` }
+    // 3) Fetch latest recording for this room (may still be processing)
+    const recListResp = await fetch(
+      `https://api.daily.co/v1/recordings?room_name=${encodeURIComponent(roomName)}`,
+      { headers: { Authorization: `Bearer ${DAILY_API_KEY}` } }
+    );
+
+    const recList = await recListResp.json();
+    const latestRecording = Array.isArray(recList?.data) && recList.data.length ? recList.data[0] : null;
+
+    return res.json({
+      room_name: roomName,
+      room_url: roomData.url,
+      join_url: joinUrl,
+      recording_id: latestRecording ? latestRecording.id : null
+    });
+
+  } catch (e) {
+    return res.status(500).json({ error: "server_error", message: e.message });
   }
-);
-
-const recList = await recListResp.json();
-const latestRecording = Array.isArray(recList?.data) && recList.data.length
-  ? recList.data[0]
-  : null;
-
-return res.json({
-  room_name: roomName,
-  room_url: roomData.url,
-  join_url: joinUrl,
-  recording_id: latestRecording ? latestRecording.id : null
 });
 
+/**
+ * GET /recording-link?recording_id=XXXX
+ * Returns: { ok: true, mp4_url: "https://..." }
+ * NOTE: must be called server-to-server with x-revei-secret
+ */
+app.get("/recording-link", async (req, res) => {
+  try {
+    requireEnv();
+    if (!checkSecret(req)) return res.status(401).json({ error: "unauthorized" });
+
+    const recordingId = String(req.query?.recording_id || "").trim();
+    if (!recordingId) return res.status(400).json({ error: "recording_id_required" });
+
+    const resp = await fetch(
+      `https://api.daily.co/v1/recordings/${encodeURIComponent(recordingId)}/access-link`,
+      { headers: { Authorization: `Bearer ${DAILY_API_KEY}` } }
+    );
+
+    const data = await resp.json();
+
+    if (!resp.ok) {
+      return res.status(500).json({ error: "daily_access_link_failed", details: data });
+    }
+
+    const link = data?.link || data?.url || "";
+    if (!link) {
+      return res.status(500).json({ error: "mp4_link_missing", details: data });
+    }
+
+    return res.json({ ok: true, mp4_url: link });
 
   } catch (e) {
     return res.status(500).json({ error: "server_error", message: e.message });
