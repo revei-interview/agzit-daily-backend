@@ -100,7 +100,7 @@ app.post("/create-room", async (req, res) => {
       body: JSON.stringify({
         properties: {
           room_name: roomName,
-          exp: Math.floor(Date.now() / 1000) + (60 * 15), // token valid 15 min
+          exp: Math.floor(Date.now() / 1000) + (60 * 60), // token valid 60 min
           eject_at_token_exp: true
         }
       })
