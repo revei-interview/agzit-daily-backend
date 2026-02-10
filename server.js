@@ -60,15 +60,27 @@ app.post("/create-room", async (req, res) => {
       })
     });
 
-    let roomData;
-    if (createRoomResp.status === 409) {
-      const getRoomResp = await fetch(`https://api.daily.co/v1/rooms/${roomName}`, {
-        headers: { Authorization: `Bearer ${DAILY_API_KEY}` }
-      });
-      roomData = await getRoomResp.json();
-    } else {
-      roomData = await createRoomResp.json();
-    }
+// Parse create response
+const createJson = await createRoomResp.json().catch(() => ({}));
+
+// If room exists, Daily may respond with different status codes.
+// So we detect it by message and fetch the room by name.
+let roomData = null;
+
+const roomAlreadyExists =
+  createRoomResp.status === 409 ||
+  (createJson?.info && String(createJson.info).toLowerCase().includes("already exists")) ||
+  (createJson?.error && String(createJson.error).toLowerCase().includes("invalid-request-error") && String(createJson?.info || "").toLowerCase().includes("already exists"));
+
+if (roomAlreadyExists) {
+  const getRoomResp = await fetch(`https://api.daily.co/v1/rooms/${roomName}`, {
+    headers: { Authorization: `Bearer ${DAILY_API_KEY}` }
+  });
+  roomData = await getRoomResp.json().catch(() => ({}));
+} else {
+  roomData = createJson;
+}
+
 
     if (!roomData?.url) {
       return res.status(500).json({ error: "daily_room_failed", details: roomData });
