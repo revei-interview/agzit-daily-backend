@@ -150,7 +150,8 @@ app.get("/latest-recording", async (req, res) => {
 
 /**
  * GET /recording-link?recording_id=XXXX
- * Returns: { ok:true, mp4_url }
+ * Returns (when ready): { ok:true, mp4_url, expires }
+ * Returns (when not ready): { ok:false, status:"processing" }
  */
 app.get("/recording-link", async (req, res) => {
   try {
@@ -168,10 +169,21 @@ app.get("/recording-link", async (req, res) => {
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok) return res.status(500).json({ error: "daily_access_link_failed", details: data });
 
-    const link = data?.link || data?.url || "";
-    if (!link) return res.status(500).json({ error: "mp4_link_missing", details: data });
+    // ✅ Daily returns mp4 as "download_link"
+    if (data?.download_link) {
+      return res.json({
+        ok: true,
+        mp4_url: data.download_link,
+        expires: data.expires || null
+      });
+    }
 
-    return res.json({ ok: true, mp4_url: link });
+    // Still processing / not ready
+    return res.json({
+      ok: false,
+      status: "processing",
+      details: data
+    });
 
   } catch (e) {
     return res.status(500).json({ error: "server_error", message: e.message });
