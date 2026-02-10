@@ -6,57 +6,25 @@ app.use(cors());
 app.use(express.json());
 
 const DAILY_API_KEY = process.env.DAILY_API_KEY;
-const REVEI_SECRET  = process.env.REVEI_SHARED_SECRET;
+const REVEI_SECRET = process.env.REVEI_SHARED_SECRET;
+
+// IMPORTANT: set this in Render ENV as: revei.daily.co
+const DAILY_DOMAIN = process.env.DAILY_DOMAIN;
 
 function requireEnv() {
   const missing = [];
   if (!DAILY_API_KEY) missing.push("DAILY_API_KEY");
   if (!REVEI_SECRET) missing.push("REVEI_SHARED_SECRET");
+  if (!DAILY_DOMAIN) missing.push("DAILY_DOMAIN");
   if (missing.length) throw new Error("Missing env vars: " + missing.join(", "));
 }
+
+app.get("/health", (req, res) => res.json({ ok: true }));
 
 function checkSecret(req) {
   const s = req.headers["x-revei-secret"];
   return s && s === REVEI_SECRET;
 }
-
-app.get("/health", (req, res) => res.json({ ok: true }));
-
-/**
- * ✅ ONE-TIME: Enable streaming so recording links become playable (inline)
- * Daily docs: recordings_bucket.allow_streaming_from_bucket controls attachment vs inline. :contentReference[oaicite:1]{index=1}
- *
- * Call this once from Postman (GET):
- *  - URL: https://agzit-daily-backend.onrender.com/enable-streaming
- *  - Header: x-revei-secret: <your secret>
- */
-app.get("/enable-streaming", async (req, res) => {
-  try {
-    requireEnv();
-    if (!checkSecret(req)) return res.status(401).json({ error: "unauthorized" });
-
-    // Set domain config
-    const resp = await fetch("https://api.daily.co/v1/", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${DAILY_API_KEY}`
-      },
-      body: JSON.stringify({
-        recordings_bucket: {
-          allow_streaming_from_bucket: true
-        }
-      })
-    });
-
-    const data = await resp.json().catch(() => ({}));
-    if (!resp.ok) return res.status(500).json({ error: "daily_set_domain_failed", details: data });
-
-    return res.json({ ok: true, message: "Streaming enabled (inline playback)", daily: data });
-  } catch (e) {
-    return res.status(500).json({ error: "server_error", message: e.message });
-  }
-});
 
 /**
  * POST /create-room
@@ -82,22 +50,22 @@ app.post("/create-room", async (req, res) => {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${DAILY_API_KEY}`
+        Authorization: `Bearer ${DAILY_API_KEY}`,
       },
       body: JSON.stringify({
         name: roomName,
         privacy: "private",
         properties: {
-          exp: Math.floor(Date.now() / 1000) + (60 * 60),
+          exp: Math.floor(Date.now() / 1000) + 60 * 60,
           max_participants: 4,
-          enable_recording: "cloud"
-        }
-      })
+          enable_recording: "cloud",
+        },
+      }),
     });
 
     const createJson = await createRoomResp.json().catch(() => ({}));
 
-    // Robust “already exists”
+    // Robust “room already exists” detection
     let roomData = null;
     const roomAlreadyExists =
       createRoomResp.status === 409 ||
@@ -105,7 +73,7 @@ app.post("/create-room", async (req, res) => {
 
     if (roomAlreadyExists) {
       const getRoomResp = await fetch(`https://api.daily.co/v1/rooms/${roomName}`, {
-        headers: { Authorization: `Bearer ${DAILY_API_KEY}` }
+        headers: { Authorization: `Bearer ${DAILY_API_KEY}` },
       });
       roomData = await getRoomResp.json().catch(() => ({}));
     } else {
@@ -116,23 +84,23 @@ app.post("/create-room", async (req, res) => {
       return res.status(500).json({ error: "daily_room_failed", details: roomData });
     }
 
-    // Token sets name + auto-starts cloud recording
+    // Token: sets name + auto-start cloud recording on join
     const tokenResp = await fetch("https://api.daily.co/v1/meeting-tokens", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${DAILY_API_KEY}`
+        Authorization: `Bearer ${DAILY_API_KEY}`,
       },
       body: JSON.stringify({
         properties: {
           room_name: roomName,
           user_name: candidateName,
-          exp: Math.floor(Date.now() / 1000) + (60 * 60),
+          exp: Math.floor(Date.now() / 1000) + 60 * 60,
           eject_at_token_exp: true,
           enable_recording: "cloud",
-          start_cloud_recording: true
-        }
-      })
+          start_cloud_recording: true,
+        },
+      }),
     });
 
     const tokenData = await tokenResp.json().catch(() => ({}));
@@ -145,9 +113,8 @@ app.post("/create-room", async (req, res) => {
     return res.json({
       room_name: roomName,
       room_url: roomData.url,
-      join_url: joinUrl
+      join_url: joinUrl,
     });
-
   } catch (e) {
     return res.status(500).json({ error: "server_error", message: e.message });
   }
@@ -178,7 +145,6 @@ app.get("/latest-recording", async (req, res) => {
     }
 
     return res.json({ ok: true, recording_id: latest.id, status: latest.status || null });
-
   } catch (e) {
     return res.status(500).json({ error: "server_error", message: e.message });
   }
@@ -187,6 +153,8 @@ app.get("/latest-recording", async (req, res) => {
 /**
  * GET /recording-link?recording_id=XXXX
  * Returns: { ok:true, mp4_url, expires }
+ *
+ * NOTE: Daily may return link under "link" OR "download_link".
  */
 app.get("/recording-link", async (req, res) => {
   try {
@@ -204,11 +172,48 @@ app.get("/recording-link", async (req, res) => {
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok) return res.status(500).json({ error: "daily_access_link_failed", details: data });
 
-    const link = data?.link || data?.url || "";
-    if (!link) return res.status(500).json({ error: "mp4_link_missing", details: data });
+    const url = data?.link || data?.url || data?.download_link || "";
+    if (!url) return res.status(500).json({ error: "mp4_link_missing", details: data });
 
-    return res.json({ ok: true, mp4_url: link, expires: data?.expires || null });
+    return res.json({ ok: true, mp4_url: url, expires: data?.expires || null });
+  } catch (e) {
+    return res.status(500).json({ error: "server_error", message: e.message });
+  }
+});
 
+/**
+ * POST /set-domain-streaming
+ * Body: { enable: true }
+ *
+ * Sets recordings_bucket.allow_streaming_from_bucket = true
+ * This makes recording links "inline" so video can play in browser (not forced download).
+ */
+app.post("/set-domain-streaming", async (req, res) => {
+  try {
+    requireEnv();
+    if (!checkSecret(req)) return res.status(401).json({ error: "unauthorized" });
+
+    const enable = !!req.body?.enable;
+
+    const url = `https://api.daily.co/v1/${encodeURIComponent(DAILY_DOMAIN)}/set-domain-config`;
+
+    const resp = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${DAILY_API_KEY}`,
+      },
+      body: JSON.stringify({
+        recordings_bucket: {
+          allow_streaming_from_bucket: enable,
+        },
+      }),
+    });
+
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) return res.status(500).json({ error: "daily_set_domain_failed", details: data });
+
+    return res.json({ ok: true, applied: { allow_streaming_from_bucket: enable }, daily: data });
   } catch (e) {
     return res.status(500).json({ error: "server_error", message: e.message });
   }
